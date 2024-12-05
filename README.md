@@ -8,3 +8,19 @@ Smart contracts for Yoink, an onchain capture the flag game.
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | Base         | [`0x4bBFD120d9f352A0BEd7a014bd67913a2007a878`](https://basescan.org/address/0x4bBFD120d9f352A0BEd7a014bd67913a2007a878)         |
 | Base Sepolia | [`0xe09c83d5a4e392965816b0e7d87a24a23ed9c90f`](https://sepolia.basescan.org/address/0xe09c83d5a4e392965816b0e7d87a24a23ed9c90f) |
+
+///////////
+//////////
+//////////
+//////////////
+
+D E P L O Y S R I P T S
+
+DEPLOY SMART CONTRACT ON BASE:
+
+source .env && forge script script/Deploy.s.sol --rpc-url $BASE_RPC_URL --private-key $PRIVATE_KEY --broadcast
+
+VERIFY CONTRACT THROUGH BASESCAN:
+
+forge verify-contract 0x286b7584C19d8813B3c8216E9933fBA159c99725 AnkyFramesgiving --chain-id 8453 --watch --constructor-args $(cast
+abi-encode "constructor(address)" 0x000000000000000000000000ffe3cdc92f24988be4f6f8c926758dce490fe77e)

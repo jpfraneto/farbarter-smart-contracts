@@ -12,7 +12,7 @@ contract Deploy is Script {
     function run() public {
         vm.startBroadcast();
 
-        ankyFramesgiving = new AnkyFramesgiving();
+        ankyFramesgiving = new AnkyFramesgiving(0xffe3CDC92F24988Be4f6F8c926758dcE490fe77E);
         console.log("AnkyFramesgiving:", address(ankyFramesgiving));
 
         vm.stopBroadcast();

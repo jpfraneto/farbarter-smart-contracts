@@ -1,33 +1,28 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+/*
+AnkyFramesgiving: A Revolutionary Writing Experience on Ethereum
+
+This contract creates a unique intersection of creative expression and blockchain technology.
+It gamifies the writing process through time-boxed sessions while ensuring fair participation
+and rewarding authentic creative engagement. The 8-minute writing sessions create a
+"proof of creative work" mechanism, turning ephemeral moments of inspiration into
+permanent digital artifacts.
+*/
+
 import {ERC721} from "solady/tokens/ERC721.sol";
 import {LibString} from "solady/utils/LibString.sol";
 import {Base64} from "solady/utils/Base64.sol";
+import {ERC20} from "solady/tokens/ERC20.sol";
 
-/*
-This being human is a guest house.
-Every morning a new arrival.
-A joy, a depression, a meanness,
-some momentary awareness comes
-as an unexpected visitor.
-Welcome and entertain them all!
-Even if they're a crowd of sorrows,
-who violently sweep your house
-empty of its furniture,
-still, treat each guest honorably.
-He may be clearing you out
-for some new delight.
-The dark thought, the shame, the malice,
-meet them at the door laughing,
-and invite them in.
-Be grateful for whoever comes,
-because each has been sent
-as a guide from beyond.
-- Rumi, The Guest House
-*/
+// TODO: Create interfaces for token factories:
+// IClankerTokenFactory should have:
+// - function deployToken(string name, string symbol, uint256 supply) returns (address)
 
-// Custom errors for better gas efficiency and clarity
+// IJerryTokenFactory should have:
+// - function deployToken(string name, string symbol, uint256 supply) returns (address)
+
 error MintingPeriodEnded();
 error AnkyAlreadyRevealed();
 error Unauthorized();
@@ -39,50 +34,68 @@ error WritingSessionTooRecent();
 error WritingSessionNotEnded();
 error ActiveSessionExists();
 error WritingSessionAlreadyEnded();
-error AlreadyMinted();
-
-// Event emitted when a new writing session begins
-event WritingSessionStarted(int indexed userFid, string indexed writingSessionId, uint256 startingTimestamp);
-// Event emitted when a writing session is completed successfully
-event WritingSessionCompleted(int indexed userFid, string indexed writingSessionId, uint256 endingTimestamp);
-// Event emitted when an Anky token is minted
-event AnkyMinted(address indexed recipient, string writingHash);
+error WritingSessionTooLong();
+error InvalidTimestamp();
+error InvalidTokenProvider();
+error TokenAlreadyDeployed();
 
 contract AnkyFramesgiving is ERC721 {
-    // Constants for timing requirements
     uint256 public constant MINTING_PERIOD = 24 hours;
     uint256 public constant WRITING_SESSION_DURATION = 8 minutes;
+    uint256 public constant REFERENCE_TIMESTAMP = 1691658000;
+    uint256 public constant DAY_DURATION = 24 hours;
+    uint256 public constant MAX_SESSION_LENGTH = 10 minutes;
     
     address public immutable owner;
+    ERC20 public immutable newenToken;
+    address public immutable clankerFactory;
+    address public immutable jerryFactory;
     
-    // Metadata structure for the NFT
     struct TokenMetadata {
-        string writingHash;          // Hash of the writing content
-        string imageURI;            // URI of the revealed Anky image
-        bool ankyRevealed;          // Whether the Anky has been revealed
-        uint256 mintingStartedAt;   // Timestamp when minting period began
-        uint256 writingSessionStartedAt; // Timestamp of writing session start
-        string writingSessionId;    // ID of the associated writing session
+        bytes32 writingHash;
+        string imageURI;
+        bool ankyRevealed;
+        uint256 mintingStartedAt;
+        uint256 writingSessionStartedAt;
+        bytes32 writingSessionId;
+        bytes32 metadata;
     }
 
-    // Structure to track individual writing sessions
     struct WritingSession {
-        int userFid;               // User's Farcaster ID
-        string writingSessionId;   // Unique session identifier
-        uint256 startingTimestamp; // When the session began
-        bool ended;                // Whether session has concluded
-        address userWallet;        // User's wallet address
-        bool isAnky;              // Whether session qualified for Anky
+        int userFid;
+        address userWallet;
+        bytes32 writingSessionId;
+        uint256 startingTimestamp;
+        uint256 endedTimestamp;
+        bytes32 ipfsHash;
+        bool isAnky;
+        address deployedToken;
     }
     
-    TokenMetadata public tokenMetadata;
+    mapping(uint256 => TokenMetadata) public tokenMetadata;
     mapping(address => bool) public approvedMinters;
-    mapping(int => string[]) public writingSessionsToUsers;
-    mapping(string => WritingSession) public writingSessions;
-    bool public minted;
+    mapping(int => bytes32[]) public writingSessionsToUsers;
+    mapping(bytes32 => WritingSession) public writingSessions;
+    uint256 public totalSupply;
     
-    constructor() {
+    event WritingSessionStarted(int indexed userFid, bytes32 indexed writingSessionId, uint256 startingTimestamp);
+    event WritingSessionCompleted(int indexed userFid, bytes32 indexed writingSessionId, uint256 endingTimestamp, bytes32 metadata);
+    event AnkyMinted(address indexed recipient, bytes32 writingHash, uint256 tokenId);
+    event TokenDeployed(bytes32 indexed writingSessionId, address indexed tokenAddress);
+    
+    constructor(
+        address _newenToken
+    ) {
         owner = msg.sender;
+        newenToken = ERC20(_newenToken);
+    }
+
+    function name() public pure virtual override returns (string memory) {
+        return "Anky Framesgiving";
+    }
+
+    function symbol() public pure virtual override returns (string memory) {
+        return "ANKY";
     }
 
     modifier onlyOwner() {
@@ -90,154 +103,122 @@ contract AnkyFramesgiving is ERC721 {
         _;
     }
 
-    // Checks if a user has an ongoing writing session
-    function checkIfUserHasActiveSession(int userFid) public view returns (string memory) {
-        if (writingSessionsToUsers[userFid].length == 0) {
-            return "";
-        }
-
-        string memory latestSessionId = writingSessionsToUsers[userFid][writingSessionsToUsers[userFid].length - 1];
-        WritingSession memory latestSession = writingSessions[latestSessionId];
-
-        if (latestSession.startingTimestamp != 0 && 
-            latestSession.startingTimestamp + WRITING_SESSION_DURATION > block.timestamp) {
-            return latestSessionId;
-        }
-
-        return "";
+    modifier validTimestamp(uint256 timestamp) {
+        if (timestamp > block.timestamp) revert InvalidTimestamp();
+        _;
     }
 
-    // Initiates a new writing session for a user
-    function startNewWritingSession(int userFid, string calldata writing_session_id, address userWallet) external onlyOwner {
-        string memory activeSession = checkIfUserHasActiveSession(userFid);
-        if (bytes(activeSession).length > 0) {
-            revert ActiveSessionExists();
+    function checkIfUserHasActiveSession(int userFid) public view returns (bytes32) {
+        bytes32[] memory userSessions = writingSessionsToUsers[userFid];
+        for (uint i = 0; i < userSessions.length; i++) {
+            WritingSession memory session = writingSessions[userSessions[i]];
+            if (session.endedTimestamp == 0) {
+                return session.writingSessionId;
+            }
         }
+        return bytes32(0);
+    }
+
+    function getCurrentDay() public view returns (uint256) {
+        if (block.timestamp < REFERENCE_TIMESTAMP) return 0;
+        return (block.timestamp - REFERENCE_TIMESTAMP) / DAY_DURATION;
+    }
+
+    function startNewWritingSession(
+        int userFid, 
+        bytes32 writing_session_id, 
+        address userWallet
+    ) external onlyOwner {
+        if (checkIfUserHasActiveSession(userFid) != bytes32(0)) revert ActiveSessionExists();
 
         writingSessionsToUsers[userFid].push(writing_session_id);
         writingSessions[writing_session_id] = WritingSession({
             userFid: userFid,
             writingSessionId: writing_session_id,
             startingTimestamp: block.timestamp,
-            ended: false,
+            endedTimestamp: 0,
             userWallet: userWallet,
-            isAnky: false
+            isAnky: false,
+            ipfsHash: bytes32(0),
+            deployedToken: address(0)
         });
-        
-        // Update token metadata for potential minting
-        tokenMetadata.writingSessionStartedAt = block.timestamp;
-        tokenMetadata.writingSessionId = writing_session_id;
         
         emit WritingSessionStarted(userFid, writing_session_id, block.timestamp);
     }
 
-    // Concludes a writing session and handles rewards
-    function endWritingSession(int userFid, string calldata writing_session_id) external {
-        if(writingSessions[writing_session_id].userFid != userFid) revert Unauthorized();   
-        if(writingSessions[writing_session_id].ended) revert WritingSessionAlreadyEnded();
-        
+    function endWritingSession(
+        int userFid, 
+        bytes32 writing_session_id, 
+        bytes32 ipfs_hash
+    ) external validTimestamp(block.timestamp) onlyOwner {
         WritingSession storage session = writingSessions[writing_session_id];
         
-        if(block.timestamp > session.startingTimestamp + WRITING_SESSION_DURATION) {
-            // Full session completed - approve for minting
-            if(session.userWallet != msg.sender) revert Unauthorized();
-            session.isAnky = true;
-            approvedMinters[msg.sender] = true;
-            emit WritingSessionCompleted(userFid, writing_session_id, block.timestamp);
-            closeSession(writing_session_id);
+        if (session.userFid != userFid) revert Unauthorized();   
+        if (session.endedTimestamp != 0) revert WritingSessionAlreadyEnded();
+        if (session.startingTimestamp == 0) revert WritingSessionNotStarted();
+        
+        uint256 sessionDuration = block.timestamp - session.startingTimestamp;
+        if (sessionDuration > MAX_SESSION_LENGTH) revert WritingSessionTooLong();
+        
+        session.isAnky = sessionDuration > WRITING_SESSION_DURATION;
+        session.ipfsHash = ipfs_hash;
+        session.endedTimestamp = block.timestamp;
+        
+        emit WritingSessionCompleted(userFid, writing_session_id, block.timestamp, ipfs_hash);
+    }
+
+    function deployAnky(
+        bytes32 writing_session_id, 
+        string memory tokenSymbol, 
+        string memory tokenName, 
+        uint256 tokenSupply, 
+        string memory tokenProvider
+    ) public {
+        WritingSession storage session = writingSessions[writing_session_id];
+        if (msg.sender != session.userWallet) revert Unauthorized();
+        if (!session.isAnky) revert WritingSessionTooRecent();
+        if (session.endedTimestamp == 0) revert WritingSessionNotEnded();
+        if (session.deployedToken != address(0)) revert TokenAlreadyDeployed();
+
+        // TODO: Implement actual token deployment once interfaces are created
+        address deployedToken;
+        if (keccak256(abi.encodePacked(tokenProvider)) == keccak256(abi.encodePacked("jerry"))) {
+            // Will call: deployedToken = IJerryTokenFactory(jerryFactory).deployToken(tokenName, tokenSymbol, tokenSupply);
+            deployedToken = address(0);
+        } else if (keccak256(abi.encodePacked(tokenProvider)) == keccak256(abi.encodePacked("clanker"))) {
+            // Will call: deployedToken = IClankerTokenFactory(clankerFactory).deployToken(tokenName, tokenSymbol, tokenSupply);
+            deployedToken = address(0);
         } else {
-            // Early termination
-            if(msg.sender != owner) revert Unauthorized();
-            closeSession(writing_session_id);
-        }
-    }
-
-    // Internal function to mark session as ended
-    function closeSession(string calldata writing_session_id) internal {
-        writingSessions[writing_session_id].ended = true;
-    }
-
-    // Mints an Anky token for completed writing sessions
-    function mint(string calldata writingHash) external {
-        if (!approvedMinters[msg.sender]) revert NotApprovedForMinting();
-        if (minted) revert AlreadyMinted();
-        
-        if (tokenMetadata.writingSessionStartedAt == 0) revert WritingSessionNotStarted();
-        
-        if (block.timestamp < tokenMetadata.writingSessionStartedAt + WRITING_SESSION_DURATION) {
-            revert WritingSessionTooRecent();
-        }
-        
-        if (tokenMetadata.mintingStartedAt == 0) {
-            tokenMetadata.mintingStartedAt = block.timestamp;
-        }
-        
-        if (block.timestamp > tokenMetadata.mintingStartedAt + MINTING_PERIOD) {
-            revert MintingPeriodEnded();
+            revert InvalidTokenProvider();
         }
 
-        _mint(msg.sender, 1);
-        tokenMetadata.writingHash = writingHash;
-        approvedMinters[msg.sender] = false;
-        minted = true;
-        
-        emit AnkyMinted(msg.sender, writingHash);
+        session.deployedToken = deployedToken;
+        emit TokenDeployed(writing_session_id, deployedToken);
+
+        uint256 tokenId = totalSupply + 1;
+        _mint(session.userWallet, tokenId);
+        totalSupply = tokenId;
+
+        tokenMetadata[tokenId] = TokenMetadata({
+            writingHash: session.ipfsHash,
+            imageURI: "",
+            ankyRevealed: false,
+            mintingStartedAt: block.timestamp,
+            writingSessionStartedAt: session.startingTimestamp,
+            writingSessionId: writing_session_id,
+            metadata: bytes32(0)
+        });
+
+        emit AnkyMinted(session.userWallet, session.ipfsHash, tokenId);
+    }
+ 
+    function withdrawNewen() external onlyOwner {
+        uint256 balance = newenToken.balanceOf(address(this));
+        bool success = newenToken.transfer(owner, balance);
+        require(success, "Token transfer failed");
     }
 
-    // Allows owner to reveal the Anky artwork
-    function revealAnky(string calldata imageURI) external onlyOwner {
-        if (!minted) revert InvalidTokenId();
-        if (tokenMetadata.ankyRevealed) revert AnkyAlreadyRevealed();
-        
-        tokenMetadata.imageURI = imageURI;
-        tokenMetadata.ankyRevealed = true;
-    }
-
-    // Returns the token URI with metadata
-    function tokenURI(uint256 id) public view override returns (string memory) {
-        if (id != 1 || !minted) revert InvalidTokenId();
-        
-        string memory image = tokenMetadata.ankyRevealed ? 
-            string.concat('", "image": "', tokenMetadata.imageURI) :
-            '", "image": "ipfs://QmS2vEhFTHRtRfCcghVwHEwjm2iE4pPyQHFpHe1p2yDtzx';
-            
-        return string.concat(
-            "data:application/json;base64,",
-            Base64.encode(
-                bytes(
-                    string.concat(
-                        '{"name": "Anky Framesgiving #1",',
-                        '"description": "A unique piece generated from an 8 minute writing session",',
-                        '"writing_hash": "',
-                        tokenMetadata.writingHash,
-                        image,
-                        '"}'
-                    )
-                )
-            )
-        );
-    }
-
-    // Returns collection-level metadata
-    function contractURI() public pure returns (string memory) {
-        return string.concat(
-            "data:application/json;base64,",
-            Base64.encode(
-                bytes(
-                    string.concat(
-                        '{"name": "Anky Framesgiving", ',
-                        '"description": "A unique piece generated from an 8 minute writing session"}'
-                    )
-                )
-            )
-        );
-    }
-
-    // Internal helper for token ownership checks
-    function _ownerOf(uint256 id) internal view virtual override returns (address owner_) {
-        if (id == 1 && minted) {
-            return ownerOf(1);
-        }
-        return address(0);
+    function tokenURI(uint256 tokenId) public view override returns (string memory) {
+        return tokenMetadata[tokenId].imageURI;
     }
 }
