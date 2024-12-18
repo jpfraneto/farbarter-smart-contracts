@@ -20,7 +20,8 @@ DEPLOY SMART CONTRACT ON BASE:
 
 source .env && forge script script/Deploy.s.sol --rpc-url $BASE_RPC_URL --private-key $PRIVATE_KEY --broadcast
 
+source .env && forge script script/Deploy.s.sol --rpc-url $HAM_RPC -vvvv --chain-id 5112 --broadcast
+
 VERIFY CONTRACT THROUGH BASESCAN:
 
-forge verify-contract 0x286b7584C19d8813B3c8216E9933fBA159c99725 AnkyFramesgiving --chain-id 8453 --watch --constructor-args $(cast
-abi-encode "constructor(address)" 0x000000000000000000000000ffe3cdc92f24988be4f6f8c926758dce490fe77e)
+forge verify-contract 0xBc25EA092e9BEd151FD1947eE1Cf957cfdd580ef AnkyFramesgiving --chain-id 666666666 --watch --constructor-args $(cast abi-encode "constructor()")

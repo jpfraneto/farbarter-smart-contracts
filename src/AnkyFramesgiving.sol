@@ -2,223 +2,192 @@
 pragma solidity ^0.8.28;
 
 /*
-AnkyFramesgiving: A Revolutionary Writing Experience on Ethereum
+The Guest House - Rumi
 
-This contract creates a unique intersection of creative expression and blockchain technology.
-It gamifies the writing process through time-boxed sessions while ensuring fair participation
-and rewarding authentic creative engagement. The 8-minute writing sessions create a
-"proof of creative work" mechanism, turning ephemeral moments of inspiration into
-permanent digital artifacts.
+This being human is a guest house.
+Every morning a new arrival.
+
+A joy, a depression, a meanness,
+some momentary awareness comes
+as an unexpected visitor.
+
+Welcome and entertain them all!
+Even if they're a crowd of sorrows,
+who violently sweep your house
+empty of its furniture,
+still, treat each guest honorably.
+He may be clearing you out
+for some new delight.
+
+The dark thought, the shame, the malice,
+meet them at the door laughing,
+and invite them in.
+
+Be grateful for whoever comes,
+because each has been sent
+as a guide from beyond.
 */
 
-import {ERC721} from "solady/tokens/ERC721.sol";
-import {LibString} from "solady/utils/LibString.sol";
-import {Base64} from "solady/utils/Base64.sol";
-import {ERC20} from "solady/tokens/ERC20.sol";
+import { ERC721 } from "solady/tokens/ERC721.sol";
+import { LibString } from "solady/utils/LibString.sol";
+import { Base64 } from "solady/utils/Base64.sol";
 
-// TODO: Create interfaces for token factories:
-// IClankerTokenFactory should have:
-// - function deployToken(string name, string symbol, uint256 supply) returns (address)
-
-// IJerryTokenFactory should have:
-// - function deployToken(string name, string symbol, uint256 supply) returns (address)
-
-error MintingPeriodEnded();
-error AnkyAlreadyRevealed();
 error Unauthorized();
-error InvalidTokenId();
-error NotApprovedForMinting();
-error TokenNotAssigned();
 error WritingSessionNotStarted();
-error WritingSessionTooRecent();
-error WritingSessionNotEnded();
-error ActiveSessionExists();
 error WritingSessionAlreadyEnded();
 error WritingSessionTooLong();
-error InvalidTimestamp();
-error InvalidTokenProvider();
-error TokenAlreadyDeployed();
+error TryingToEndWrongSession(string sessionId, uint256 fid);
+error SessionAlreadyMinted();
+error SessionAlreadyStored();
 
 contract AnkyFramesgiving is ERC721 {
-    uint256 public constant MINTING_PERIOD = 24 hours;
-    uint256 public constant WRITING_SESSION_DURATION = 8 minutes;
-    uint256 public constant REFERENCE_TIMESTAMP = 1691658000;
-    uint256 public constant DAY_DURATION = 24 hours;
-    uint256 public constant MAX_SESSION_LENGTH = 10 minutes;
-    
-    address public immutable owner;
-    ERC20 public immutable newenToken;
-    address public immutable clankerFactory;
-    address public immutable jerryFactory;
-    
-    struct TokenMetadata {
-        bytes32 writingHash;
-        string imageURI;
-        bool ankyRevealed;
-        uint256 mintingStartedAt;
-        uint256 writingSessionStartedAt;
-        bytes32 writingSessionId;
-        bytes32 metadata;
+  uint256 public constant WRITING_SESSION_DURATION = 8 minutes;
+
+  address public immutable owner;
+
+  // Token tracking
+  uint256 private _tokenIdCounter;
+
+  // Maps tokenId to IPFS hash containing metadata
+  mapping(uint256 => string) private _tokenIPFSHashes;
+
+  // Maps fid to their current writing session text
+  mapping(uint256 => string) public currentWritingSession;
+
+  // Maps fid to array of completed session IPFS hashes
+  mapping(uint256 => string[]) public completedSessions;
+
+  // Maps fid to array of anky IPFS hashes
+  mapping(uint256 => mapping(string => bool)) public validUserAnkys;
+
+  // Maps IPFS hash to whether it has been stored
+  mapping(string => bool) public isHashStored;
+
+  // Maps IPFS hash to whether it has been minted
+  mapping(string => bool) public isHashMinted;
+
+  // Maps fid to session start time
+  mapping(uint256 => uint256[]) public sessionStartTimes;
+
+  mapping(string => uint256) public sessionIdToTimestamp;
+
+  // Maps fid to index in allWritersAtThisMoment for efficient removal
+  mapping(uint256 => uint256) public writerToIndex;
+  uint256[] public allWritersAtThisMoment;
+
+  event SessionStarted(uint256 indexed fid, string indexed sessionId, uint256 indexed startTime);
+  event SessionEndedAbruptly(uint256 indexed fid, string indexed sessionId);
+  event SessionEnded(uint256 indexed fid, bool indexed isAnky, string indexed ipfsHash);
+  event AnkyWritten(uint256 indexed fid, string indexed sessionId, string ipfsHash, uint256 writtenAt);
+  event AnkyMinted(uint256 indexed fid, string ipfsHash, uint256 indexed tokenId);
+
+  constructor() {
+    owner = msg.sender;
+    _tokenIdCounter = 0;
+  }
+
+  modifier onlyOwner() {
+    if (msg.sender != owner) revert Unauthorized();
+    _;
+  }
+
+  function name() public pure override returns (string memory) {
+    return "Anky Framesgiving";
+  }
+
+  function symbol() public pure override returns (string memory) {
+    return "ANKY";
+  }
+
+  function startSession(uint256 fid, string memory session_id) external onlyOwner {
+    // If there's an open session, end it first
+    require(bytes(session_id).length > 0, "Session ID cannot be empty");
+    if (bytes(currentWritingSession[fid]).length > 0) {
+      string memory openSessionId = currentWritingSession[fid];
+      currentWritingSession[fid] = "";
+      emit SessionEndedAbruptly(fid, openSessionId);
     }
 
-    struct WritingSession {
-        int userFid;
-        address userWallet;
-        bytes32 writingSessionId;
-        uint256 startingTimestamp;
-        uint256 endedTimestamp;
-        bytes32 ipfsHash;
-        bool isAnky;
-        address deployedToken;
-    }
-    
-    mapping(uint256 => TokenMetadata) public tokenMetadata;
-    mapping(address => bool) public approvedMinters;
-    mapping(int => bytes32[]) public writingSessionsToUsers;
-    mapping(bytes32 => WritingSession) public writingSessions;
-    uint256 public totalSupply;
-    
-    event WritingSessionStarted(int indexed userFid, bytes32 indexed writingSessionId, uint256 startingTimestamp);
-    event WritingSessionCompleted(int indexed userFid, bytes32 indexed writingSessionId, uint256 endingTimestamp, bytes32 metadata);
-    event AnkyMinted(address indexed recipient, bytes32 writingHash, uint256 tokenId);
-    event TokenDeployed(bytes32 indexed writingSessionId, address indexed tokenAddress);
-    
-    constructor(
-        address _newenToken
-    ) {
-        owner = msg.sender;
-        newenToken = ERC20(_newenToken);
+    currentWritingSession[fid] = session_id;
+    sessionStartTimes[fid].push(block.timestamp);
+    sessionIdToTimestamp[session_id] = block.timestamp;
+    writerToIndex[fid] = allWritersAtThisMoment.length;
+    allWritersAtThisMoment.push(fid);
+    emit SessionStarted(fid, session_id, block.timestamp);
+  }
+
+  function endSession(uint256 fid, string memory session_id, string memory ipfsHash, bool isAnky) public onlyOwner {
+    if (bytes(currentWritingSession[fid]).length == 0) revert WritingSessionNotStarted();
+    if (keccak256(bytes(currentWritingSession[fid])) != keccak256(bytes(session_id))) {
+      revert TryingToEndWrongSession(session_id, fid);
     }
 
-    function name() public pure virtual override returns (string memory) {
-        return "Anky Framesgiving";
+    // Check if hash has already been stored
+    if (bytes(ipfsHash).length > 0) {
+      if (isHashStored[ipfsHash]) revert SessionAlreadyStored();
+      completedSessions[fid].push(ipfsHash);
+      isHashStored[ipfsHash] = true;
     }
 
-    function symbol() public pure virtual override returns (string memory) {
-        return "ANKY";
+    // Remove writer from active writers - O(1) removal using index mapping
+    if (allWritersAtThisMoment.length > 0) {
+      uint256 indexToRemove = writerToIndex[fid];
+      if (indexToRemove < allWritersAtThisMoment.length) {
+        uint256 lastWriter = allWritersAtThisMoment[allWritersAtThisMoment.length - 1];
+        allWritersAtThisMoment[indexToRemove] = lastWriter;
+        writerToIndex[lastWriter] = indexToRemove;
+        allWritersAtThisMoment.pop();
+        delete writerToIndex[fid];
+      }
     }
 
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert Unauthorized();
-        _;
+    currentWritingSession[fid] = "";
+
+    if (isAnky && bytes(ipfsHash).length > 0) {
+      validUserAnkys[fid][ipfsHash] = true;
+      // Emit detailed event for Ponder indexing
+      emit AnkyWritten(fid, session_id, ipfsHash, block.timestamp);
     }
 
-    modifier validTimestamp(uint256 timestamp) {
-        if (timestamp > block.timestamp) revert InvalidTimestamp();
-        _;
-    }
+    emit SessionEnded(fid, isAnky, ipfsHash);
+  }
 
-    function checkIfUserHasActiveSession(int userFid) public view returns (bytes32) {
-        bytes32[] memory userSessions = writingSessionsToUsers[userFid];
-        for (uint i = 0; i < userSessions.length; i++) {
-            WritingSession memory session = writingSessions[userSessions[i]];
-            if (session.endedTimestamp == 0) {
-                return session.writingSessionId;
-            }
-        }
-        return bytes32(0);
-    }
+  function mintAnky(uint256 fid, address writerAddress, string memory writingIpfsHash, string memory metadataIpfsHash, string memory sessionId) external onlyOwner returns (uint256) {
+    // Check if this ipfsHash exists in user's written Ankys
+    require(validUserAnkys[fid][writingIpfsHash], "This Anky was not written by this address");
 
-    function getCurrentDay() public view returns (uint256) {
-        if (block.timestamp < REFERENCE_TIMESTAMP) return 0;
-        return (block.timestamp - REFERENCE_TIMESTAMP) / DAY_DURATION;
-    }
+    // Check if hash has already been minted
+    if (isHashMinted[writingIpfsHash]) revert SessionAlreadyMinted();
 
-    function startNewWritingSession(
-        int userFid, 
-        bytes32 writing_session_id, 
-        address userWallet
-    ) external onlyOwner {
-        if (checkIfUserHasActiveSession(userFid) != bytes32(0)) revert ActiveSessionExists();
+    // Check if enough time has elapsed since session start
+    uint256 sessionStartTime = sessionIdToTimestamp[sessionId];
+    require(block.timestamp >= sessionStartTime + WRITING_SESSION_DURATION, "Writing session duration not met");
 
-        writingSessionsToUsers[userFid].push(writing_session_id);
-        writingSessions[writing_session_id] = WritingSession({
-            userFid: userFid,
-            writingSessionId: writing_session_id,
-            startingTimestamp: block.timestamp,
-            endedTimestamp: 0,
-            userWallet: userWallet,
-            isAnky: false,
-            ipfsHash: bytes32(0),
-            deployedToken: address(0)
-        });
-        
-        emit WritingSessionStarted(userFid, writing_session_id, block.timestamp);
-    }
+    uint256 newTokenId = _tokenIdCounter++;
+    _mint(writerAddress, newTokenId);
 
-    function endWritingSession(
-        int userFid, 
-        bytes32 writing_session_id, 
-        bytes32 ipfs_hash
-    ) external validTimestamp(block.timestamp) onlyOwner {
-        WritingSession storage session = writingSessions[writing_session_id];
-        
-        if (session.userFid != userFid) revert Unauthorized();   
-        if (session.endedTimestamp != 0) revert WritingSessionAlreadyEnded();
-        if (session.startingTimestamp == 0) revert WritingSessionNotStarted();
-        
-        uint256 sessionDuration = block.timestamp - session.startingTimestamp;
-        if (sessionDuration > MAX_SESSION_LENGTH) revert WritingSessionTooLong();
-        
-        session.isAnky = sessionDuration > WRITING_SESSION_DURATION;
-        session.ipfsHash = ipfs_hash;
-        session.endedTimestamp = block.timestamp;
-        
-        emit WritingSessionCompleted(userFid, writing_session_id, block.timestamp, ipfs_hash);
-    }
+    // Store IPFS hash containing metadata
+    _tokenIPFSHashes[newTokenId] = metadataIpfsHash;
+    isHashMinted[writingIpfsHash] = true;
 
-    function deployAnky(
-        bytes32 writing_session_id, 
-        string memory tokenSymbol, 
-        string memory tokenName, 
-        uint256 tokenSupply, 
-        string memory tokenProvider
-    ) public {
-        WritingSession storage session = writingSessions[writing_session_id];
-        if (msg.sender != session.userWallet) revert Unauthorized();
-        if (!session.isAnky) revert WritingSessionTooRecent();
-        if (session.endedTimestamp == 0) revert WritingSessionNotEnded();
-        if (session.deployedToken != address(0)) revert TokenAlreadyDeployed();
+    emit AnkyMinted(fid, metadataIpfsHash, newTokenId);
+    return newTokenId;
+  }
 
-        // TODO: Implement actual token deployment once interfaces are created
-        address deployedToken;
-        if (keccak256(abi.encodePacked(tokenProvider)) == keccak256(abi.encodePacked("jerry"))) {
-            // Will call: deployedToken = IJerryTokenFactory(jerryFactory).deployToken(tokenName, tokenSymbol, tokenSupply);
-            deployedToken = address(0);
-        } else if (keccak256(abi.encodePacked(tokenProvider)) == keccak256(abi.encodePacked("clanker"))) {
-            // Will call: deployedToken = IClankerTokenFactory(clankerFactory).deployToken(tokenName, tokenSymbol, tokenSupply);
-            deployedToken = address(0);
-        } else {
-            revert InvalidTokenProvider();
-        }
+  function getCompletedSessionCount(uint256 fid) external view returns (uint256) {
+    return completedSessions[fid].length;
+  }
 
-        session.deployedToken = deployedToken;
-        emit TokenDeployed(writing_session_id, deployedToken);
+  function getSessionStartTimes(uint256 fid) external view returns (uint256[] memory) {
+    return sessionStartTimes[fid];
+  }
 
-        uint256 tokenId = totalSupply + 1;
-        _mint(session.userWallet, tokenId);
-        totalSupply = tokenId;
+  function getCurrentSession(uint256 fid) external view returns (string memory text) {
+    return (currentWritingSession[fid]);
+  }
 
-        tokenMetadata[tokenId] = TokenMetadata({
-            writingHash: session.ipfsHash,
-            imageURI: "",
-            ankyRevealed: false,
-            mintingStartedAt: block.timestamp,
-            writingSessionStartedAt: session.startingTimestamp,
-            writingSessionId: writing_session_id,
-            metadata: bytes32(0)
-        });
-
-        emit AnkyMinted(session.userWallet, session.ipfsHash, tokenId);
-    }
- 
-    function withdrawNewen() external onlyOwner {
-        uint256 balance = newenToken.balanceOf(address(this));
-        bool success = newenToken.transfer(owner, balance);
-        require(success, "Token transfer failed");
-    }
-
-    function tokenURI(uint256 tokenId) public view override returns (string memory) {
-        return tokenMetadata[tokenId].imageURI;
-    }
+  function tokenURI(uint256 tokenId) public view override returns (string memory) {
+    if (!_exists(tokenId)) revert("Token does not exist");
+    return string(abi.encodePacked("ipfs://", _tokenIPFSHashes[tokenId]));
+  }
 }
