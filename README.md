@@ -13,4 +13,4 @@ source .env && forge script script/Deploy.s.sol --rpc-url $DEGEN_RPC_URL --priva
 
 VERIFY CONTRACT THROUGH DEGENSCAN:
 
-forge verify-contract 0xC83c51bf18c5E21a8111Bd7C967c1EcDB15b90E8 AnkySpandas --chain-id 666666666 --watch --constructor-args $(cast abi-encode "constructor()")
+forge verify-contract 0xbAeCa7e569eFea6e020014EAb898373407bBe826 FarBarter --chain-id 8453 --watch --constructor-args $(cast abi-encode "constructor()")

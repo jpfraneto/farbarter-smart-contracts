@@ -2,18 +2,18 @@
 pragma solidity ^0.8.28;
 
 import { Script, console } from "forge-std/Script.sol";
-import { FarBarter } from "../src/FarBarter.sol";
+import { WeeklyHackathonWeekOneVotingTEST } from "../src/WeeklyHackathonWeekOneVotingTEST.sol";
 
 contract Deploy is Script {
-  FarBarter public farBarter;
+  WeeklyHackathonWeekOneVotingTEST public weeklyHackathonWeekOneVotingTEST;
 
   function setUp() public {}
 
   function run() public {
     vm.startBroadcast();
 
-    farBarter = new FarBarter();
-    console.log("FarBarter:", address(farBarter));
+    weeklyHackathonWeekOneVotingTEST = new WeeklyHackathonWeekOneVotingTEST();
+    console.log("WeeklyHackathonWeekOneVotingTEST:", address(weeklyHackathonWeekOneVotingTEST));
 
     vm.stopBroadcast();
   }
